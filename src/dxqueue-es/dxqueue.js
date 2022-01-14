@@ -14,10 +14,16 @@ importClass(Packages.novell.jclient.JCException);
 importClass(Packages.novell.jclient.JClient);
 importClass(java.io.StringWriter);
 
-var VERSION = "1.2.0";
+var VERSION = "1.2.1";
 
-var debugPrefix = 'sendMigrateApp';
+var debugPrefix = "sendXDS";
 var debugDefault = 3;
+
+var supportedOps = 'add|modify|modify-password|rename|move|delete|trigger|sync|statement';
+var processUnsupportedOps = true
+var myEncoding = java.nio.charset.StandardCharsets.UTF_8;
+// send mode must be one of "queueEvent" or "migrateApp"
+var sendMode = "queueEvent"
 
 function serializeEx(doc, indent) {
     // 
@@ -104,8 +110,32 @@ function properXDS(doc) {
     return docRet.getOwnerDocument().getDocumentElement();
 }
 
+function sendQueueEvent(driverDN, myElement) {
+
+    debugPrefix = 'sendQueueEvent'; 
+    supportedOps = 'add|modify|modify-password|rename|move|delete|trigger|sync|statement';
+    // relaxed processing: unsupported commands normally are ignored, but may mean something to specififc shims.
+    // as long as the doc is otherwise well formed, it should not crash the engine.
+    processUnsupportedOps = true;
+    sendMode = "queueEvent";
+    
+    return sendXDS(driverDN, myElement)
+}
+
 function sendMigrateApp(driverDN, myElement) {
+
+    debugPrefix = 'sendMigrateApp';
     // this function takes either a query/query-ex command or an entire XDS doc
+    supportedOps = 'query|query-ex';
+    // strict processing: can only inject query|query-ex.
+    processUnsupportedOps = false;
+    sendMode = "migrateApp";
+    
+    return sendXDS(driverDN, myElement)
+}
+
+function sendXDS(driverDN, myElement) {
+    // this function takes either a command (modify/add/trigger) or an entire XDS doc
     // if necessary, it wraps the command in an XDS doc.
     // returns status document: Document doc
     // requires: com.novell.nds.dhutil.JCHelper
@@ -126,14 +156,8 @@ function sendMigrateApp(driverDN, myElement) {
     // function properXDS
     // skeletonXDS
 
-    var supportedOps = 'query|query-ex';
-    // strict processing: can only inject query|query-ex.
-    // as long as the doc is otherwise well formed, it should not crash the engine.
-    var processUnsupportedOps = false
-    var myEncoding = java.nio.charset.StandardCharsets.UTF_8;
-
     if (!(Packages.com.novell.nds.dirxml.engine.DirXML.isExternal())) {
-        try {
+        try {           
             debugMessage('Cleaning up supplied XDS');
             var theElement = properXDS(myElement);
             (theElement === myElement) ? debugMessage('Passthru XDS as-is') : debugMessage('Cleaned up XDS')
@@ -157,9 +181,9 @@ function sendMigrateApp(driverDN, myElement) {
             } catch (e) { debugMessage('error' + e) }
             if (null == rootDoc) {
                 debugMessage('Trying built-in getOwnerDocument() method as last resort', debugDefault + 1);
-                    var rootDoc = theElement.getOwnerDocument()
+                var rootDoc = theElement.getOwnerDocument()
             }
-            
+
 
             try {
                 if (null == myOps) {
@@ -177,7 +201,7 @@ function sendMigrateApp(driverDN, myElement) {
             if (myOps.first().getLocalName().matches(supportedOps)) {
                 debugMessage('Detected known command: ' + myOps.first().getLocalName())
             }
-            
+
             else if (processUnsupportedOps) {
                 debugMessage('Detected unknown command: ' + myOps.first().getLocalName() + '. Submitting anyway, it may be ignored by the shim ')
             }
@@ -196,35 +220,40 @@ function sendMigrateApp(driverDN, myElement) {
                     .getDocumentElement()
             } else {
 
-            treeName = MiscDS.getTreeName();
-            debugMessage('Detected tree name: ' + treeName);
-            var context = new JCContext(0, treeName, "00.\\+=*'");
-            JCHelper.loginAsServer(context);
-            debugMessage('Attempting to authenticate to tree');
-            context.authenticate();
-            var currentDriverDN = ThreadGroupVars.get("vrDriverDN");
-            debugMessage('Resolving source driver:' + currentDriverDN);
-            if (null == currentDriverDN) {
-                throw new JCException("getEffectivePriviledges()", -672);
-            }
-            if (!(driverDN.startsWith("\\"))) {
-                debugMessage('Converting ' + driverDN + ' to absolute path...', debugDefault + 1);
-                driverDN = '\\' + treeName + '\\' + driverDN;
-            }
+                treeName = MiscDS.getTreeName();
+                debugMessage('Detected tree name: ' + treeName);
+                var context = new JCContext(0, treeName, "00.\\+=*'");
+                JCHelper.loginAsServer(context);
+                debugMessage('Attempting to authenticate to tree');
+                context.authenticate();
+                var currentDriverDN = ThreadGroupVars.get("vrDriverDN");
+                debugMessage('Resolving source driver:' + currentDriverDN);
+                if (null == currentDriverDN) {
+                    throw new JCException("getEffectivePriviledges()", -672);
+                }
+                if (!(driverDN.startsWith("\\"))) {
+                    debugMessage('Converting ' + driverDN + ' to absolute path...', debugDefault + 1);
+                    driverDN = '\\' + treeName + '\\' + driverDN;
+                }
+    
+                debugMessage('Verifying target driver exists: ' + driverDN);
+                context.nameToID(1, driverDN);
+                debugMessage('Verifying rights to source driver: ' + currentDriverDN);
+                   if ((context.getEffectivePrivileges(currentDriverDN, "[Entry Rights]") & 0x10) == (new java.lang.Long(0))) {
+                    throw new JCException("getEffectivePriviledges()", -672);
+                }
 
-            debugMessage('Verifying target driver exists: ' + driverDN);
-            context.nameToID(1, driverDN);
-            debugMessage('Verifying rights to source driver: ' + currentDriverDN);
-            if ((context.getEffectivePrivileges(currentDriverDN, "[Entry Rights]") & 0x10) == (new java.lang.Long(0))) {
-                throw new JCException("getEffectivePriviledges()", -672);
-            }
-
-            debugMessage('Queuing supplied XDS');
-                        var wireCtor = new DxWire();
-            wireCtor.setDnFormat(0);
-            result = sendWireRequest(context, wireCtor.constructMigrateApp(driverDN, bytes));
-            output = NdsDtd.createStatusDocument(NdsDtd.SL_SUCCESS, null, 'Submitted document for execution on subscriber channel on driver: ' + driverDN)
-                .getDocumentElement()
+                debugMessage('Queuing supplied XDS');
+                var wireCtor = new DxWire();
+                wireCtor.setDnFormat(0);
+                if (sendMode.equals("queueEvent")) {
+                    result = sendWireRequest(context, wireCtor.constructQueueEvent(driverDN, bytes));
+                } else {
+                    result = sendWireRequest(context, wireCtor.constructMigrateApp(driverDN, bytes));
+                }
+                output = NdsDtd.createStatusDocument(NdsDtd.SL_SUCCESS, null, 'Submitted document for execution on subscriber channel on driver: ' + driverDN)
+                    .getDocumentElement()
+                
             }
 
         } catch (t) {
@@ -238,17 +267,17 @@ function sendMigrateApp(driverDN, myElement) {
     return output;
 }
 
-    function sendWireRequest(context, wireData) {
-        replyBuffer = new java.lang.reflect.Array.newInstance(java.lang.Byte.TYPE, wireData.getResponseSize())
-        replySize = JClient.ndsRequest(context, wireData.getVerb(), wireData.getRequestData()
-            .length, wireData.getRequestData(), replyBuffer.length, replyBuffer);
-        if (0 == replySize) {
-            return null;
-        }
-        else if (replySize != replyBuffer.length) {
-            temp = new java.lang.reflect.Array.newInstance(java.lang.Byte.TYPE, replySize)
-            Java.lang.System.arraycopy(replyBuffer, 0, temp, 0, replySize);
-            replyBuffer = temp;
-        }
-        return replyBuffer;
+function sendWireRequest(context, wireData) {
+    replyBuffer = new java.lang.reflect.Array.newInstance(java.lang.Byte.TYPE, wireData.getResponseSize())
+    replySize = JClient.ndsRequest(context, wireData.getVerb(), wireData.getRequestData()
+        .length, wireData.getRequestData(), replyBuffer.length, replyBuffer);
+    if (0 == replySize) {
+        return null;
+    }
+    else if (replySize != replyBuffer.length) {
+        temp = new java.lang.reflect.Array.newInstance(java.lang.Byte.TYPE, replySize)
+        Java.lang.System.arraycopy(replyBuffer, 0, temp, 0, replySize);
+        replyBuffer = temp;
+    }
+    return replyBuffer;
 }
